@@ -1,10 +1,12 @@
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import numpy as np
 import pandas as pd
 import datetime 
 import plotly
 import plotly.graph_objs as go
 import plotly.io as pio
+from io import StringIO
 from plotly.subplots import make_subplots
 
 
@@ -33,7 +35,10 @@ def get_gsheet(sname):
     # Extract and print all of the values
     list_of_hashes = sheet.get_all_records()
     df = pd.DataFrame(list_of_hashes)
-    df["Date/Time"] = df["Date/Time"].transform(lambda x: datetime.datetime.fromtimestamp(x/1000))
+    try:        
+        df["Date/Time"] = df["Date/Time"].transform(lambda x: datetime.datetime.strptime(x, "%m/%d/%Y %H:%M:%S") )
+    except:
+        df["Date/Time"] = df["Date/Time"].transform(lambda x: datetime.datetime.fromtimestamp(x/1000))
     return df
 
 def process_inverter_log(fname):
@@ -168,14 +173,26 @@ def return_log(sol_log, cday = None):
     else:
         return [i for i in sol_log if i[0].day == cday.day and i[0].month == cday.month and i[-1] > 0  and i[-1] < 20000]      
 
-def read_ecobee(ecobee_csv_file):
-    thermDataHeader = pd.read_csv(ecobee_csv_file, skiprows=4).keys()    
-    thermDataData = pd.read_csv(ecobee_csv_file, skiprows=6)
-    res = {kk:thermDataData.iloc[:,idx] for idx,kk in enumerate(thermDataHeader)}
+def read_ecobee(ecobee_csv_file, is_from_online=True):
+    if(type(ecobee_csv_file) is list):
+        is_from_online = False
+    if(is_from_online):
+        thermDataHeader = pd.read_csv(ecobee_csv_file, skiprows=4).keys()    
+        thermDataData = pd.read_csv(ecobee_csv_file, skiprows=6)
+        res = {kk:thermDataData.iloc[:,idx] for idx,kk in enumerate(thermDataHeader)}
+    else:
+        if type(ecobee_csv_file) is str:
+            res = pd.read_csv(ecobee_csv_file)
+        else:
+            res = pd.read_csv(StringIO("\n".join(ecobee_csv_file)))
     res["Datetime"] = (res["Date"]+ " "+res["Time"]).transform(lambda x: datetime.datetime.strptime(x, "%Y-%m-%d %H:%M:%S") )
     ecobeeData = pd.DataFrame(res)
     return ecobeeData
 
+def powerdata_to_pd(power_log):
+    return pd.DataFrame(data=power_log, columns=["Datetime","Energy (kWh)","Power (W)"])
+
+    
 def return_ecobee_data(ecobeeData, cday=None):
     if cday is None:
         cday = datetime.datetime.today()
@@ -185,10 +202,78 @@ def return_ecobee_data(ecobeeData, cday=None):
         idx = ecobeeData["Datetime"].transform(lambda x: x.month==cday.month and x.day == cday.day)
     return ecobeeData.loc[idx]
 
+
+def plot_two_types(y1, y2, xfield="Datetime"):
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    name1 = str(list(set(y1.keys()) - set([xfield]))[0])
+    name2 = str(list(set(y2.keys()) - set([xfield]))[0])
+    fig.add_trace(go.Scatter(x=y1[xfield], y=y1[name1], name=name1, mode='lines+markers'), secondary_y = False)
+    fig.add_trace(go.Scatter(x=y2[xfield], y=y2[name2], name=name2, mode='lines+markers'), secondary_y = True)
+    fig.update_yaxes(title_text=name1, secondary_y=False)
+    fig.update_yaxes(title_text=name2, secondary_y=True)            
+    return fig
 def plot_ecobee_data(ecobeeData):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Current Temp (F)"], name="Main", mode="markers+lines"))
-    fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Outdoor Temp (F)"], name="Outdoor", mode="markers+lines"))
-    fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Bedroom (F)"], name="Bedroom", mode="markers+lines"))
-    fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Sunroom (F)"], name="Sunroom", mode="markers+lines"))
+    try:
+        fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Current Temp (F)"], name="Main", mode="markers+lines"))
+        fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Downstairs (F)"], name="Living Room", mode="markers+lines"))
+        fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Outdoor Temp (F)"], name="Outdoor", mode="markers+lines"))
+        fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Bedroom (F)"], name="Bedroom", mode="markers+lines"))
+        fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Sunroom (F)"], name="Sunroom", mode="markers+lines"))
+    except:
+        fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Thermostat Temperature temperature"], name="Main", mode="markers+lines"))
+        fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Downstairs temperature"], name="Living Room", mode="markers+lines"))        
+        fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["outdoorTemp"], name="Outdoor", mode="markers+lines"))     
+        fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Bedroom temperature"], name="Bedroom", mode="markers+lines"))
+        fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Sunroom temperature"], name="Sunroom", mode="markers+lines"))
+        fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["outdoorHumidity"], name="Outdoor Humdity", mode="lines"))
+        fig.add_trace(go.Scatter(x=ecobeeData["Datetime"], y=ecobeeData["Thermostat Humidity humidity"], name="Indoor Humdity", mode="lines"))
+        
     return fig
+
+def get_furnace_runtime(eco_log):
+    """
+    Returns the runtime of the ecobee log in minutes
+
+    Parameters
+    ----------
+    eco_log : pandas array
+        DESCRIPTION.
+
+    Returns
+    -------
+    None.
+
+    """
+        
+    return len(eco_log["zoneHVACmode"][eco_log["zoneHVACmode"] == "heatStage1On"])*5
+
+def get_avg_temp(eco_log,cday=None):
+    if cday is None:
+        cday = datetime.datetime.now()
+    return np.mean(return_ecobee_data(eco_log, cday=cday)["outdoorTemp"].values)
+
+
+def get_runtime_vs_temp(eco_log):
+    return [[cday, get_furnace_runtime(return_ecobee_data(eco_log, cday=cday)), \
+             get_avg_temp(eco_log, cday=cday)]\
+            for cday in pd.date_range(eco_log["Datetime"][0],eco_log["Datetime"][len(eco_log)-2])]
+
+def running_mean(x, N):
+    cumsum = np.cumsum(np.insert(x, 0, 0)) 
+    return (cumsum[N:] - cumsum[:-N]) / float(N)
+
+def heat_loss_rate(ecobeeData, navg = 8):
+    delta_t_mins = np.int64(ecobeeData['Datetime'].diff().values)*1e-9/(60)
+    # this gives the rate of heat loss in degree F/ min
+    try:
+        dh_dt = ecobeeData['Sunroom (F)'].diff().values[1:]/delta_t_mins[1:]
+        
+        
+        dTemp = ecobeeData['Outdoor Temp (F)']-ecobeeData['Sunroom (F)']
+    except:
+        dh_dt = ecobeeData['Sunroom temperature'].diff().values[1:]/delta_t_mins[1:]
+        dTemp = ecobeeData['outdoorTemp']-ecobeeData['Sunroom temperature']
+    # this gets the sampled rate of heat change
+    c = dh_dt/dTemp.values[1:]
+    return running_mean(c,navg)
