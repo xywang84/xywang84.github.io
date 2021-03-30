@@ -12,7 +12,7 @@ from plotly.subplots import make_subplots
 
 def open_gsheet(sname):
     scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name('home_energy.json', scope)
+    creds = ServiceAccountCredentials.from_json_keyfile_name('../keys/home_energy.json', scope)
     client = gspread.authorize(creds)
     
     # Find a workbook by name and open the first sheet
@@ -24,7 +24,7 @@ def open_gsheet(sname):
 def get_gsheet(sname):
 # use creds to create a client to interact with the Google Drive API
     scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name('home_energy.json', scope)
+    creds = ServiceAccountCredentials.from_json_keyfile_name('../keys/home_energy.json', scope)
     client = gspread.authorize(creds)
     
     # Find a workbook by name and open the first sheet
@@ -190,7 +190,9 @@ def read_ecobee(ecobee_csv_file, is_from_online=True):
     return ecobeeData
 
 def powerdata_to_pd(power_log):
-    return pd.DataFrame(data=power_log, columns=["Datetime","Energy (kWh)","Power (W)"])
+    res = pd.DataFrame(data=power_log, columns=["Datetime","Energy (kWh)","Power (W)"])
+    res = res[res["Power (W)"] > 0]
+    return res.reset_index()
 
     
 def return_ecobee_data(ecobeeData, cday=None):
@@ -205,12 +207,13 @@ def return_ecobee_data(ecobeeData, cday=None):
 
 def plot_two_types(y1, y2, xfield="Datetime"):
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    name1 = str(list(set(y1.keys()) - set([xfield]))[0])
-    name2 = str(list(set(y2.keys()) - set([xfield]))[0])
-    fig.add_trace(go.Scatter(x=y1[xfield], y=y1[name1], name=name1, mode='lines+markers'), secondary_y = False)
+    name1 = set(y1.keys()) - set([xfield])
+    name2 = str(list(set(y2.keys()) - set([xfield]))[0])    
+    for nme in name1:
+        fig.add_trace(go.Scatter(x=y1[xfield], y=y1[nme], name=nme, mode='lines+markers'), secondary_y = False)
     fig.add_trace(go.Scatter(x=y2[xfield], y=y2[name2], name=name2, mode='lines+markers'), secondary_y = True)
-    fig.update_yaxes(title_text=name1, secondary_y=False)
-    fig.update_yaxes(title_text=name2, secondary_y=True)            
+    fig.update_yaxes(title_text="Temperature", secondary_y=False)
+    fig.update_yaxes(title_text="Power", secondary_y=True)            
     return fig
 def plot_ecobee_data(ecobeeData):
     fig = go.Figure()
@@ -251,19 +254,20 @@ def get_furnace_runtime(eco_log):
 def get_avg_temp(eco_log,cday=None):
     if cday is None:
         cday = datetime.datetime.now()
-    return np.mean(return_ecobee_data(eco_log, cday=cday)["outdoorTemp"].values)
+    dat = return_ecobee_data(eco_log, cday=cday)["outdoorTemp"].values    
+    return np.mean(dat[np.bitwise_not(np.isnan(dat))])
 
 
 def get_runtime_vs_temp(eco_log):
     return [[cday, get_furnace_runtime(return_ecobee_data(eco_log, cday=cday)), \
              get_avg_temp(eco_log, cday=cday)]\
-            for cday in pd.date_range(eco_log["Datetime"][0],eco_log["Datetime"][len(eco_log)-2])]
+            for cday in pd.date_range(eco_log["Datetime"].iloc[0],eco_log["Datetime"].iloc[len(eco_log)-2])]
 
 def running_mean(x, N):
     cumsum = np.cumsum(np.insert(x, 0, 0)) 
     return (cumsum[N:] - cumsum[:-N]) / float(N)
 
-def heat_loss_rate(ecobeeData, navg = 8):
+def heat_loss_rate(ecobeeData, navg= 8, room= "Sunroom temperature",get_rate=True):
     delta_t_mins = np.int64(ecobeeData['Datetime'].diff().values)*1e-9/(60)
     # this gives the rate of heat loss in degree F/ min
     try:
@@ -272,8 +276,66 @@ def heat_loss_rate(ecobeeData, navg = 8):
         
         dTemp = ecobeeData['Outdoor Temp (F)']-ecobeeData['Sunroom (F)']
     except:
-        dh_dt = ecobeeData['Sunroom temperature'].diff().values[1:]/delta_t_mins[1:]
-        dTemp = ecobeeData['outdoorTemp']-ecobeeData['Sunroom temperature']
-    # this gets the sampled rate of heat change
-    c = dh_dt/dTemp.values[1:]
-    return running_mean(c,navg)
+        dh_dt = ecobeeData[room].diff().values[1:]/delta_t_mins[1:]
+        dTemp = ecobeeData['outdoorTemp']-ecobeeData[room]
+    # this gets the sampled rate of heat change    
+    if(get_rate):
+        c = dh_dt/dTemp.values[1:]
+    else:
+        c = dh_dt
+    c[np.isnan(c)] = 0
+    c[np.isinf(c)] = 0
+    # print(c)
+    return running_mean(c[np.bitwise_not(np.isnan(c))],navg)
+    # return(c)
+
+def return_car_charging(power_log, threshold_start=1600, avg_samples = 60, min_run_length=10):
+    idx = power_log["Power (W)"] > threshold_start
+    temp = power_log["Power (W)"][idx]
+    # temp holds all the indicies in power_log that are above the threshold, 
+    # we then integrate the consecutive runs. If two indicies aren't part of 
+    # the same run, their diff > 1, so disqualify any indicies that didn't
+    # maintain an interval. 
+    run_lengths = np.cumsum(np.diff(temp.index) == 1)*np.int64(np.diff(temp.index) == 1)
+    # need to add a zero at the end to find the most recent instnace
+    run_lengths =  np.hstack((run_lengths,0))
+    # The start of each run is when 
+    run_starts = np.argwhere(run_lengths == 0).flatten()
+    intervals = [[run_starts[i]+1, run_starts[i+1]-1] for i in range(len(run_starts)-1)]
+    intervals = [v for v in intervals if v[1]-v[0] > min_run_length]
+    result = pd.DataFrame()
+    # try:
+    for intv in intervals:        
+        result = result.append(power_log.iloc[temp.index[range(*intv)]])
+    idx_locs = [[temp.index[intv[0]], temp.index[intv[1]]+1] for intv in intervals]
+
+    # use avg_samples number of samples to calibrate background
+    avg_pwrs = \
+        [[(power_log["Energy (kWh)"][ii[0]-1] - power_log["Energy (kWh)"][ii[0]-1-avg_samples])/\
+             ((power_log["Datetime"][ii[0]-1] - power_log["Datetime"][ii[0]-1-avg_samples]).seconds/3600), \
+          (power_log["Energy (kWh)"][ii[1]+1+avg_samples] - power_log["Energy (kWh)"][ii[1]+1])/ \
+              ((power_log["Datetime"][ii[1]+1+avg_samples] - power_log["Datetime"][ii[1]+1]).seconds/3600)] \
+                for ii in idx_locs]
+    energy_log = power_log["Energy (kWh)"]
+    datetime_log = power_log["Datetime"]
+    delta_energy = [energy_log[ii[1]] - energy_log[ii[0]] for ii in idx_locs]
+    charging_time = [[datetime_log[ii[0]],datetime_log[ii[1]], datetime_log[ii[1]] - datetime_log[ii[0]]] for ii in idx_locs]
+    # corrected_energy = [energy_log[ii[1]] - energy_log[ii[0]] - \
+    #  np.mean(bg)*(datetime_log[ii[1]] - datetime_log[ii[0]]).seconds/3600 for ii,bg in zip(idx_locs,avg_pwrs)]
+    corrected_energy = \
+      [energy_log[ii[1]] - energy_log[ii[0]] - \
+             np.mean(bg)*(datetime_log[ii[1]] - datetime_log[ii[0]]).seconds/3600 \
+      for ii,bg in zip(idx_locs,avg_pwrs)]    
+    res_list = [{"Timestamp": tt, "Energy (kWh)": ee, "Raw Energy (kWh)": re, "Corrections (W)": corr}\
+                for tt,ee,re,corr in zip(charging_time, corrected_energy, delta_energy, avg_pwrs)]
+    out = dict()
+    out["DataFrame"] = result
+    out["EventList"] = res_list
+    return out #,temp,idx_locs, run_lengths, run_starts,intervals
+    # except:
+    #     return intervals,temp
+
+def get_slope(panda_log, key, interval):
+    res = return_ecobee_data(panda_log, interval)
+    m = (res[key].iloc[-1] - res[key].iloc[0]) / ((res["Datetime"].iloc[-1]-res["Datetime"].iloc[0]).seconds/3600)
+    return m
